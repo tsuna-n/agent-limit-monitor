@@ -1,0 +1,7 @@
+{
+  "threshold_percent": 2,
+  "poll_seconds": 120,
+  "probe_timeout_seconds": 12,
+  "desktop_notifications": false,
+  "claude_statusline": true
+}
