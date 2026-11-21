@@ -14,7 +14,9 @@ agent-limit-monitor --help
 
 Add `$HOME/.local/bin` to your `PATH` if needed. You can also run `python3 /absolute/path/to/switch-work/agent_limit_monitor.py`.
 
-Run `bash install-skill.sh` to install the skill for Codex and OpenCode in `~/.agents/skills/agent-limit-monitor/` and for AGY in `~/.gemini/antigravity-cli/skills/agent-limit-monitor/`. Run `bash install-skill.sh --project-opencode` to install it for OpenCode in this checkout only. The installer leaves existing copies in place. Start a new agent session to pick up the skill. [Codex skills](https://learn.chatgpt.com/docs/build-skills), [Antigravity skills](https://antigravity.google/docs/skills), [OpenCode skills](https://opencode.ai/docs/skills/)
+Run `bash install-skill.sh` to install the skill and its alias for Codex and OpenCode in `~/.agents/skills`, AGY in `~/.gemini/antigravity-cli/skills`, and Claude Code in `~/.claude/skills`. [Codex skills](https://learn.chatgpt.com/docs/build-skills), [Antigravity skills](https://antigravity.google/docs/skills), [OpenCode skills](https://opencode.ai/docs/skills/), [Claude Code skills](https://code.claude.com/docs/en/skills)
+
+Run `bash install-skill.sh --update` to refresh all four user installations. Updates retain each installed `config.yaml` and print the backup path for each replaced copy. To install or refresh a project copy in this checkout, use `--project-opencode` or `--project-claude`, with `--update` first when refreshing. OpenCode gives the project copy precedence over the user copy. Start a new agent session to pick up the updated skill. [OpenCode skill precedence](https://opencode.ai/docs/skills/#precedence)
 
 ### Monitor normal launches in Bash
 
@@ -32,7 +34,7 @@ Setup adds an `agent-limit-monitor` PATH line to `~/.bashrc` and links the monit
 
 ## Use
 
-To choose a handoff destination, invoke `$agent-limit-monitor` in Codex, `@agent-limit-monitor` in OpenCode, or `/agent-limit-monitor` (also `/agent-limit-moritor`) in AGY. The skill shows the Bash handoff command for the selected destination. If the source CLI cannot respond because its quota is exhausted, use `switch` directly from Bash after exiting it.
+Invoke `agent-limit-monitor` or the alias `agent-limit-moritor` using the skill syntax of your CLI. Enter the destination by name or by its number in the displayed menu. In Antigravity, select **1. Codex**, **2. OpenCode**, **3. Claude Code**, or **4. Cancel**. The skill writes handoff notes from the current conversation and runs `switch SOURCE TARGET --notes FILE --open`. When Antigravity requests permission for the handoff command to run outside its terminal sandbox, approve that command to let it reach the monitor or Kitty. For a monitor-managed source, exit the source normally so the target can take over. The target uses the same terminal when the source wrapper supports queuing. An unmanaged source opens the target in Kitty. If the source cannot respond because its quota is exhausted, use `switch` directly from Bash after exiting it.
 
 Run from the project directory. Every command also accepts `--project DIR`.
 
@@ -48,7 +50,7 @@ agent-limit-monitor switch agy codex
 - `check` reads once. `watch` polls and alerts on entry into a low-quota state.
 - `run` starts a managed interactive agent in the same directory. It polls while the agent runs and watches for rate-limit errors. If an alert occurs during the session, save work and exit normally to open the menu. A handoff after an already-closed session is also available with `handoff AGENT --notes FILE`. A previous CLI error can be supplied with `--error-file FILE` to `check` or `handoff`. Use a CLI-generated error stream with `--error-file`, such as Codex's `exec --json` output.
 - `switch SOURCE TARGET` starts a manual handoff after the source exits. It checks the target, asks for a summary or reads `--notes FILE`, and waits for `yes` before launching the target. It works without quota data or a rate-limit error from the source.
-- The menu offers AGY CLI, OpenCode, Claude Code, Codex, Continue current agent, and Cancel handoff. The selected CLI must pass its availability and authentication checks. Codex also needs a verified quota with capacity remaining. Type `yes` to attest that the prior agent and its editing jobs have stopped and to start the selected agent with the handoff package. The monitor offers a single successful switch per invocation.
+- The terminal menu accepts agent names or numbers, plus Continue and Cancel. The selected CLI must pass its readiness checks. Codex also needs a verified quota with capacity remaining. OpenCode handoffs verify the model and start the interactive session in [standalone mode](https://opencode.ai/docs/cli/#background-service). Type `yes` during a manual terminal switch to confirm the prior agent and its editing jobs have stopped and start the selected destination.
 - `--dry-run` runs one check and prints the action it would take. Pair it with `--mock-5h`, `--mock-weekly`, or `--mock-rate-error` to simulate values without invoking any vendor CLI.
 - `config.yaml` accepts the JSON subset of YAML. Copy it and pass `--config FILE` for local settings. `threshold_percent` defaults to 2, `poll_seconds` to 120, and `probe_timeout_seconds` to 12. Set `desktop_notifications` to `true` to add a desktop alert to the terminal bell. Set `claude_statusline` to `false` to keep your existing Claude status line during managed runs.
 
@@ -70,7 +72,7 @@ Keep a private JSON file outside the project. Use a string or list of strings fo
 }
 ```
 
-Review notes for credentials and sensitive details before approving a switch. The monitor includes changed filenames and Git status, plus your reviewed notes, in a private Markdown file under `/tmp/agent-limit-monitor-<uid>/`. The package contains no project file contents or patches. Remove the package once you no longer need it. Temporary system storage may be cleared by the OS. The target receives the package path as its initial prompt and uses its usual filesystem permissions to read the file.
+Review notes for credentials and sensitive details before approving a switch. The monitor includes changed filenames and Git status, plus your reviewed notes, in a private Markdown file under `/tmp/agent-limit-monitor-<uid>/`. The package contains no project file contents or patches. Keep notes available until the destination starts. Remove the package once you no longer need it. Temporary system storage may be cleared by the OS. The target receives the package path as its initial prompt and uses its usual filesystem permissions to read the file.
 
 A lock coordinates monitor-managed sessions for the same Git worktree, including invocations from subdirectories. For projects without Git it coordinates the exact project directory. The lock covers the current and replacement processes. Close any agent or detached editing job before approving the switch. The wrapper leaves the Git index, refs, and worktree in place. The package records changes to submodule pointers in the parent worktree. Run the monitor inside a submodule to capture its own worktree changes.
 

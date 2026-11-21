@@ -84,10 +84,12 @@ class AntigravityTests(unittest.TestCase):
 class OpenCodeTests(unittest.TestCase):
     @contextmanager
     def replies(self, provider, *, connection=None, reset=None, limit=False, wrong_directory=False, settings=None,
-                go_console_connection=None):
+                go_console_connection=None, free=False, missing_provider=False):
         with tempfile.TemporaryDirectory(prefix="switch work ") as tmp:
             project = Path(tmp).resolve()
             model = {"id": "model", "providerID": provider, "enabled": True, "settings": settings}
+            if free:
+                model["cost"] = [{"input": 0, "output": 0}]
             expiry = reset if reset is not None else int(datetime.now(timezone.utc).timestamp() + 3600) * 1000
             meter = {"percent": 98, "resetsAt": expiry, "limited": limit}
             integration = "opencode" if provider == "opencode-go" and go_console_connection is None else provider
@@ -102,14 +104,20 @@ class OpenCodeTests(unittest.TestCase):
             }
             if go_console_connection is not None:
                 data["/api/integration/opencode"] = {"id": "opencode", "connections": [go_console_connection]}
+            if missing_provider:
+                del data[f"/api/provider/{provider}"]
 
             def capture(argv, cwd, timeout):
-                self.assertEqual(argv[:3], ["opencode", "api", "GET"])
+                api_args = argv[2:] if argv[1] == "--standalone" else argv[1:]
+                self.assertEqual(argv[0], "opencode")
+                self.assertEqual(api_args[:2], ["api", "GET"])
                 self.assertEqual(cwd, project)
                 self.assertGreater(timeout, 0)
                 self.assertLessEqual(timeout, 2)
-                route = urlsplit(argv[3])
+                route = urlsplit(api_args[2])
                 self.assertEqual(parse_qs(route.query), {"location[directory]": [str(project)]})
+                if route.path not in data:
+                    return process(argv, code=1)
                 directory = "/different/project" if wrong_directory else str(project)
                 return process(argv, {"location": {"directory": directory}, "data": data[route.path]})
 
@@ -166,3 +174,18 @@ class OpenCodeTests(unittest.TestCase):
             verification = opencode.verify(project, 2)
             self.assertFalse(verification.ready)
             self.assertNotIn("sensitive", verification.detail)
+
+    def test_handoff_verifies_official_free_model_through_private_server(self):
+        public_route = {"apiKey": "public", "baseURL": "https://opencode.ai/inference/openai/v1"}
+        with self.replies("opencode", free=True, missing_provider=True, settings=public_route) as (project, invocation):
+            verification = opencode.verify(project, 2)
+            self.assertTrue(verification.ready)
+            self.assertEqual(verification.model, "opencode/model")
+            for result in invocation.call_args_list:
+                self.assertEqual(result.args[0][1], "--standalone")
+        with self.replies("opencode", free=True, missing_provider=True,
+                          settings={"apiKey": "public", "baseURL": "https://custom.invalid"}) as (project, _):
+            self.assertFalse(opencode.verify(project, 2).ready)
+        with self.replies("opencode", free=True, missing_provider=True,
+                          settings={"apiKey": "unverified"}) as (project, _):
+            self.assertFalse(opencode.verify(project, 2).ready)

@@ -2,3 +2,10 @@ __pycache__/
 *.pyc
 .venv/
 .opencode/skills/agent-limit-monitor/
+.opencode/skills/agent-limit-moritor/
+.claude/skills/agent-limit-monitor/
+.claude/skills/agent-limit-moritor/
+.opencode/skills/.agent-limit-*.*/
+.claude/skills/.agent-limit-*.*/
+.opencode/.agent-limit-*-backup.*/
+.claude/.agent-limit-*-backup.*/

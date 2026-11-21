@@ -11,6 +11,8 @@ import tempfile
 import time
 import unittest
 
+from handoff import project_lock
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "agent_limit_monitor.py"
 
@@ -43,6 +45,7 @@ class CLIIntegrationTests(unittest.TestCase):
         install = ["bash", SCRIPT.with_name("install-skill.sh")]
         agy_skills = self.project / ".gemini" / "antigravity-cli" / "skills"
         shared_skills = self.project / ".agents" / "skills"
+        claude_skills = self.project / ".claude" / "skills"
         alias_name = "agent-limit-moritor"
         alias_skill = agy_skills / alias_name / "SKILL.md"
 
@@ -51,7 +54,14 @@ class CLIIntegrationTests(unittest.TestCase):
         self.assertTrue(alias_text.startswith(f"---\nname: {alias_name}\n"))
         self.assertIn("../agent-limit-monitor/SKILL.md", alias_text)
         self.assertTrue((agy_skills / "agent-limit-monitor" / "SKILL.md").is_file())
-        self.assertFalse((shared_skills / alias_name).exists())
+        self.assertEqual((shared_skills / alias_name / "SKILL.md").read_text(encoding="utf-8"), alias_text)
+        claude_alias = claude_skills / alias_name / "SKILL.md"
+        self.assertTrue(claude_alias.is_file(), "Claude Code compatibility alias was not installed")
+        self.assertEqual(claude_alias.read_text(encoding="utf-8"), alias_text)
+        self.assertEqual(
+            (claude_skills / "agent-limit-monitor" / "SKILL.md").read_bytes(),
+            SCRIPT.with_name("SKILL.md").read_bytes(),
+        )
         self.assertEqual(
             (shared_skills / "agent-limit-monitor" / "agy" / alias_name / "SKILL.md").read_text(encoding="utf-8"),
             alias_text,
@@ -63,6 +73,56 @@ class CLIIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(str(alias_skill.parent), result.stderr)
         self.assertEqual(alias_skill.read_text(encoding="utf-8"), "keep local edits\n")
+
+    def test_install_update_backs_up_changed_skills_and_preserves_configs(self):
+        env = self.env | {
+            "HOME": str(self.project),
+            "XDG_DATA_HOME": str(self.project / "data"),
+            "XDG_STATE_HOME": str(self.project / "state"),
+        }
+        install = ["bash", SCRIPT.with_name("install-skill.sh")]
+        skill_roots = [self.project / path for path in (
+            ".agents/skills", ".gemini/antigravity-cli/skills", ".claude/skills",
+        )]
+        installed = [root / "agent-limit-monitor" for root in skill_roots]
+        configs = [json.dumps({"threshold_percent": index + 7}) + "\n" for index in range(len(installed))]
+        alias = skill_roots[0] / "agent-limit-moritor" / "SKILL.md"
+        subprocess.run(install, env=env, capture_output=True, timeout=5, check=True)
+        previous_skills = {}
+        for index, (skill, config) in enumerate(zip(installed, configs, strict=True)):
+            skill.mkdir(parents=True, exist_ok=True)
+            old_skill = f"previous skill {index}\n"
+            previous_skills[old_skill] = config
+            (skill / "SKILL.md").write_text(old_skill, encoding="utf-8")
+            (skill / "config.yaml").write_text(config, encoding="utf-8")
+        config_link = installed[0] / "config.yaml"
+        config_link.rename(installed[0] / "local-config.yaml")
+        config_link.symlink_to("local-config.yaml")
+        alias.write_text("previous alias\n", encoding="utf-8")
+
+        result = subprocess.run([*install, "--update"], env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backups = [Path(line.removeprefix("Backup: ")) for line in result.stdout.splitlines()
+                   if line.startswith("Backup: ")]
+        self.assertEqual(len(backups), len(installed) + 1)
+        backed_up_skills = set()
+        for backup in backups:
+            self.assertTrue(backup.is_absolute())
+            self.assertFalse(any(backup.is_relative_to(root) for root in skill_roots))
+            self.assertEqual(backup.stat().st_mode & 0o077, 0)
+            old_skill = (backup / "SKILL.md").read_text(encoding="utf-8")
+            backed_up_skills.add(old_skill)
+            if old_skill in previous_skills:
+                self.assertEqual((backup / "config.yaml").read_text(encoding="utf-8"), previous_skills[old_skill])
+        self.assertEqual(backed_up_skills, {*previous_skills, "previous alias\n"})
+        source_skill = SCRIPT.with_name("SKILL.md").read_bytes()
+        for skill, config in zip(installed, configs, strict=True):
+            self.assertEqual((skill / "SKILL.md").read_bytes(), source_skill)
+            self.assertEqual((skill / "config.yaml").read_text(encoding="utf-8"), config)
+        self.assertEqual(alias.read_bytes(), (SCRIPT.parent / "agy" / alias.parent.name / "SKILL.md").read_bytes())
+
+        result = subprocess.run([*install, "--update"], env=env, capture_output=True, text=True, timeout=5, check=True)
+        self.assertNotIn("Backup: ", result.stdout)
 
     def test_mock_dry_run_neither_probes_nor_launches_agent(self):
         self.fake("codex", "from pathlib import Path\nPath('unexpected').touch()\n")
@@ -184,6 +244,108 @@ pathlib.Path("target-launched").touch()
             seen = self.until(fd, b"Claude Code login could not be verified")
             self.assertEqual(process.wait(timeout=5), 1)
             self.assertNotIn(b"Handoff summary", seen)
+
+    def test_skill_switch_to_source_reports_valid_destinations(self):
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "switch", "agy", "agy", "--notes", self.notes, "--open"],
+            cwd=self.project, env=self.env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("agy is the source. Choose one of: codex, opencode, claude.", result.stderr)
+
+    def handoff_target(self):
+        target = r"""
+import json
+from pathlib import Path
+import re
+import sys
+if sys.argv[1:] == ["app-server", "--listen", "stdio://"]:
+    responses = {
+        "initialize": {"userAgent": "fake"},
+        "account/read": {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True},
+        "config/read": {"config": {"model_provider": "openai"}},
+        "account/rateLimits/read": {"rateLimits": {"primary": {"usedPercent": 20, "windowDurationMins": 300}}},
+    }
+    for line in sys.stdin:
+        request = json.loads(line)
+        if "id" in request:
+            print(json.dumps({"id": request["id"], "result": responses[request["method"]]}), flush=True)
+    sys.exit(0)
+if sys.argv[1:3] == ["auth", "status"]:
+    print('{"loggedIn": true, "authMethod": "claude.ai"}')
+    sys.exit(0)
+package = Path(re.search(r"(/[^ ]+\.md)", sys.argv[-1]).group(1))
+try:
+    assert "Found regression" in package.read_text()
+finally:
+    package.unlink()
+Path("target-launched").write_text(Path(sys.argv[0]).name)
+"""
+        for name in ("codex", "claude"):
+            self.fake(name, target)
+
+    def test_skill_switch_opens_a_terminal_and_continues_with_notes(self):
+        self.handoff_target()
+        self.env["DISPLAY"] = ":0"
+        self.fake("kitty", """
+import os
+import pty
+import sys
+assert sys.argv[1:4] == ["--detach", "--hold", "--session=none"]
+assert sys.argv[4:6] == ["--directory", os.getcwd()]
+sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[6:])))
+""")
+        for target in ("codex", "claude"):
+            with self.subTest(target=target):
+                result = subprocess.run(
+                    [sys.executable, SCRIPT, "switch", "agy", target, "--notes", self.notes, "--open"],
+                    cwd=self.project, env=self.env, capture_output=True, text=True, timeout=7, check=True,
+                )
+                self.assertNotIn("Type 'yes'", result.stdout)
+                self.assertEqual((self.project / "target-launched").read_text(), target)
+
+    def test_skill_switch_waits_for_a_legacy_managed_source(self):
+        self.handoff_target()
+        self.fake("kitty", "import os, pty, sys\nsys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[6:])))\n")
+        env = self.env | {"DISPLAY": ":0", "AGENT_LIMIT_MONITOR_ACTIVE": "1"}
+        with contextlib.ExitStack() as cleanup:
+            with project_lock(self.project):
+                process = cleanup.enter_context(subprocess.Popen(
+                    [sys.executable, SCRIPT, "switch", "agy", "claude", "--notes", self.notes, "--open"],
+                    cwd=self.project, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                ))
+                self.until(process.stdout.fileno(), b"Waiting for the source session")
+                self.assertFalse((self.project / "target-launched").is_file())
+            self.assertEqual(process.wait(timeout=5), 0)
+        self.assertTrue((self.project / "target-launched").is_file())
+
+    def test_skill_switch_in_a_managed_session_replaces_the_quota_menu(self):
+        self.handoff_target()
+        self.env.pop("DISPLAY", None)
+        self.env.pop("WAYLAND_DISPLAY", None)
+        self.fake("agy", f"""
+import os
+from pathlib import Path
+import subprocess
+import sys
+if len(sys.argv) > 1:
+    sys.exit(1)
+print("Error: Individual quota reached", flush=True)
+subprocess.run([sys.executable, {str(SCRIPT)!r}, "switch", "agy", os.environ["TEST_TARGET"], "--notes",
+                "handoff.json", "--open"], check=True)
+input()
+assert not Path("target-launched").exists()
+""")
+        marker = self.project / "target-launched"
+        for target in ("codex", "claude"):
+            self.env["TEST_TARGET"] = target
+            marker.unlink(missing_ok=True)
+            with self.subTest(target=target), self.session(sys.executable, SCRIPT, "run", "agy") as (process, fd):
+                self.until(fd, f"Handoff queued for {target}".encode())
+                self.assertFalse(marker.exists())
+                os.write(fd, b"exit\n")
+                self.assertEqual(process.wait(timeout=5), 0)
+                self.assertEqual(marker.read_text(), target)
 
     def test_managed_claude_ingests_live_status_line(self):
         self.fake("claude", """

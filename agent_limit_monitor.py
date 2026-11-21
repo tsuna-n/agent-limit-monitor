@@ -3,6 +3,7 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 from pathlib import Path
 import shutil
@@ -20,6 +21,7 @@ import terminal_ui
 
 SCRIPT = Path(__file__).resolve()
 ACTIVE = "AGENT_LIMIT_MONITOR_ACTIVE"
+HANDOFF_REQUEST = "AGENT_LIMIT_MONITOR_HANDOFF_REQUEST"
 DEFAULTS = {"threshold_percent": 2, "poll_seconds": 120, "probe_timeout_seconds": 12,
             "desktop_notifications": False, "claude_statusline": True}
 
@@ -62,6 +64,10 @@ def arguments(argv):
             sub.add_argument("--notes", type=Path, help="Reviewed JSON notes for a handoff.")
         if action == "switch":
             sub.add_argument("target", choices=AGENTS, help="Agent that receives the handoff.")
+            mode = sub.add_mutually_exclusive_group()
+            mode.add_argument("--open", action="store_true", help="Open the selected agent from a skill with --notes.")
+            mode.add_argument("--approved", action="store_true", help=argparse.SUPPRESS)
+            sub.add_argument("--wait-for-project", action="store_true", help=argparse.SUPPRESS)
             sub.set_defaults(threshold=None, dry_run=False)
             continue
         sub.add_argument("--threshold", type=percentage, help="Alert at or below this remaining percentage.")
@@ -127,8 +133,10 @@ def announce(reading, agent, threshold, desktop=False, *, guidance=""):
 
 
 def launch(agent, project, lease, settings, *, resume=False, prompt=None, model=None,
-           probe=None, on_reading=None):
+           probe=None, on_reading=None, request=None):
     environment = os.environ | {ACTIVE: "1"}
+    if request is not None:
+        environment[HANDOFF_REQUEST] = str(request)
     observer = ErrorObserver(agent) if on_reading is not None else None
     reported_error = False
 
@@ -178,7 +186,7 @@ def launch(agent, project, lease, settings, *, resume=False, prompt=None, model=
             return 128 - status if status < 0 else status
 
 
-def handoff(args, settings, root, lease, *, resume_current=True, target=None):
+def handoff(args, settings, root, lease, *, resume_current=True, target=None, approved=False):
     while True:
         selected = target or terminal_ui.select(args.agent)
         if selected is None:
@@ -208,9 +216,10 @@ def handoff(args, settings, root, lease, *, resume_current=True, target=None):
             return 0
         if not summary:
             return 0
-    print("Confirm that the previous agent and its editing tasks have stopped.", flush=True)
-    if not terminal_ui.confirm(selected):
-        return 0
+    if not approved:
+        print("Confirm that the previous agent and its editing tasks have stopped.", flush=True)
+        if not terminal_ui.confirm(selected):
+            return 0
     package = make_package(root, args.notes, summary=summary)
     print(f"Private handoff package: {package}", flush=True)
     prompt = (f"Read the reviewed handoff package at {package}. Continue the original task in this "
@@ -224,10 +233,48 @@ def handoff(args, settings, root, lease, *, resume_current=True, target=None):
             notified = announce(reading, selected, settings["threshold_percent"], settings["desktop_notifications"])
 
     target_probe = None
-    if selected != "claude":
+    if selected == "opencode":
+        target_probe = lambda: adapter(selected).probe(args.project, settings["probe_timeout_seconds"], standalone=True)
+    elif selected != "claude":
         target_probe = lambda: adapter(selected).probe(args.project, settings["probe_timeout_seconds"])
     return launch(selected, args.project, lease, settings, prompt=prompt, model=verification.model,
                   probe=target_probe, on_reading=on_reading)
+
+
+def open_handoff(args):
+    if not shutil.which(BINARIES[args.target]):
+        raise ValueError(f"{args.target} executable is unavailable.")
+    notes = args.notes.resolve(strict=True)
+    if request := os.environ.get(HANDOFF_REQUEST):
+        request = Path(request)
+        try:
+            with tempfile.NamedTemporaryFile("w", dir=request.parent, encoding="utf-8") as pending:
+                json.dump({"source": args.agent, "target": args.target, "project": str(args.project),
+                           "notes": str(notes)}, pending)
+                pending.flush()
+                os.link(pending.name, request)
+        except FileExistsError as error:
+            raise ValueError("A handoff is already queued for this session.") from error
+        print(f"Handoff queued for {args.target}. Exit the source normally to start it here.")
+        return 0
+
+    kitty = shutil.which("kitty")
+    if not kitty or not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        raise ValueError("Opening a handoff window requires Kitty and a graphical desktop.")
+    command_line = [sys.executable, SCRIPT, "switch", args.agent, args.target,
+                    "--project", args.project, "--notes", notes, "--approved"]
+    if args.config is not None:
+        command_line.extend(["--config", args.config.resolve(strict=True)])
+    environment = os.environ.copy()
+    managed = environment.pop(ACTIVE, None)
+    if managed:
+        command_line.append("--wait-for-project")
+    subprocess.run([kitty, "--detach", "--hold", "--session=none", "--directory", args.project,
+                    *command_line], env=environment, stdin=subprocess.DEVNULL, check=True)
+    print(f"Handoff terminal requested for {args.target}.")
+    if managed:
+        print("Exit the source normally to let the destination take over.")
+    return 0
 
 
 def execute(args, settings):
@@ -251,6 +298,15 @@ def execute(args, settings):
             previous = reading
             time.sleep(settings["poll_seconds"])
 
+    if args.action == "switch":
+        if args.target == args.agent:
+            targets = ", ".join(agent for agent in AGENTS if agent != args.agent)
+            raise ValueError(f"{args.agent} is the source. Choose one of: {targets}.")
+        if (args.open or args.approved) and args.notes is None:
+            raise ValueError("Supply reviewed handoff notes with --notes.")
+        if args.open:
+            return open_handoff(args)
+
     if os.environ.get(ACTIVE):
         raise ValueError("An agent managed by this monitor cannot start another handoff.")
     if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -258,11 +314,12 @@ def execute(args, settings):
     if getattr(args, "claude_status_stdin", False):
         raise ValueError("Use Claude status-line input with check or a dry run.")
 
-    with project_lock(args.project) as (root, lease):
+    wait_for_source = args.action == "switch" and args.approved and args.wait_for_project
+    if wait_for_source:
+        print("Waiting for the source session to release the project.", flush=True)
+    with project_lock(args.project, wait=wait_for_source) as (root, lease):
         if args.action == "switch":
-            if args.target == args.agent:
-                raise ValueError("Choose a target different from the source agent.")
-            return handoff(args, settings, root, lease, target=args.target)
+            return handoff(args, settings, root, lease, target=args.target, approved=args.approved)
         targets = ", ".join(terminal_ui.handoff_targets(args.agent))
         guidance = f"Installed handoff options: {targets}." if targets else "No other supported CLI is installed."
         initial = poll(args, settings)
@@ -285,8 +342,16 @@ def execute(args, settings):
         live_probe = None
         if args.agent != "claude" and mock_reading(args) is None:
             live_probe = lambda: poll(args, settings)
-        status = launch(args.agent, args.project, lease, settings, resume=args.resume,
-                        probe=live_probe, on_reading=on_reading)
+        with tempfile.TemporaryDirectory(prefix="agent-limit-request-") as directory:
+            request = Path(directory) / "handoff.json"
+            status = launch(args.agent, args.project, lease, settings, resume=args.resume,
+                            probe=live_probe, on_reading=on_reading, request=request)
+            if status < 128 and request.is_file():
+                pending = json.loads(request.read_text(encoding="utf-8"))
+                if pending["source"] != args.agent or Path(pending["project"]) != args.project:
+                    raise ValueError("The queued handoff does not match the running agent and project.")
+                args.notes = Path(pending["notes"])
+                return handoff(args, settings, root, lease, target=pending["target"], approved=True)
         return handoff(args, settings, root, lease) if triggered and status < 128 else status
 
 

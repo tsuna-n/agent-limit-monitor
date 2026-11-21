@@ -47,13 +47,13 @@ def select(current: str) -> str | None:
     print("  6. Cancel handoff")
     print(f"Current agent: {current}")
     try:
-        choice = input("Select [1-6]: ").strip()
+        choice = input("Select [1-6] or enter an agent name: ").strip().casefold()
     except (EOFError, KeyboardInterrupt):
         return None
-    if choice in ("1", "2", "3", "4"):
-        agent = _AGENTS[int(choice) - 1][0]
-        return "continue" if agent == current else agent
-    if choice == "5":
+    for number, (agent, label) in enumerate(_AGENTS, 1):
+        if choice in (str(number), agent, label.casefold()):
+            return "continue" if agent == current else agent
+    if choice in ("5", "continue"):
         return "continue"
     return None
 

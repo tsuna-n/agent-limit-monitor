@@ -150,8 +150,9 @@ class TerminalTests(unittest.TestCase):
             self.assertEqual(select_agent("opencode"), "continue")
 
     def test_agy_can_select_codex_for_handoff(self):
-        with patch("builtins.input", return_value="4"), patch("sys.stdout"):
-            self.assertEqual(select_agent("agy"), "codex")
+        for answer in ("4", " Codex ", "CODEX"):
+            with self.subTest(answer=answer), patch("builtins.input", return_value=answer), patch("sys.stdout"):
+                self.assertEqual(select_agent("agy"), "codex")
 
     def test_sigterm_restores_terminal_and_reaps_agent(self):
         with tempfile.TemporaryDirectory() as tmp:

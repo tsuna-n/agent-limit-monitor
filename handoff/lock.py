@@ -21,8 +21,8 @@ def _project_root(project: Path) -> Path:
 
 
 @contextmanager
-def project_lock(project: Path):
-    """Hold an exclusive, nonblocking lease until the context exits."""
+def project_lock(project: Path, *, wait=False):
+    """Hold an exclusive lease until the context exits."""
     root = _project_root(project)
     state = _state_directory(root)
     key = hashlib.sha256(os.fsencode(root)).hexdigest()
@@ -35,7 +35,7 @@ def project_lock(project: Path):
         if stat.S_IMODE(info.st_mode) != 0o600:
             os.fchmod(fd, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise ProjectLockedError(f"A monitor or agent already owns {root}") from error
         yield root, fd

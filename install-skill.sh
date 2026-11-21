@@ -2,6 +2,11 @@
 set -euo pipefail
 
 alm_source=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+alm_update=false
+if [[ ${1-} == --update ]]; then
+    alm_update=true
+    shift
+fi
 
 install_skill() (
     alm_parent=$1
@@ -10,24 +15,51 @@ install_skill() (
     shift 3
     alm_destination="$alm_parent/$alm_name"
     mkdir -p -- "$alm_parent"
+    exec {alm_install_fd}<"$alm_parent"
+    flock -x "$alm_install_fd"
     alm_stage=$(mktemp -d -- "$alm_parent/.$alm_name.XXXXXXXX")
-    trap 'rm -rf -- "$alm_stage"' EXIT
+    alm_backup=
+    cleanup_skill() {
+        if [[ -n "$alm_backup" && -d "$alm_backup" && -d "$alm_stage" ]]; then
+            if ! mv -T --no-clobber -- "$alm_backup" "$alm_destination" || [[ -d "$alm_backup" ]]; then
+                printf 'Previous skill remains in %s\n' "$alm_backup" >&2
+            fi
+        fi
+        rm -rf -- "$alm_stage"
+    }
+    trap cleanup_skill EXIT
     tar -C "$alm_package" --exclude=__pycache__ --exclude='*.pyc' -cf - "$@" |
         tar -C "$alm_stage" -xf -
 
     if [[ -e "$alm_destination" || -L "$alm_destination" ]]; then
+        alm_config="$alm_destination/config.yaml"
+        if $alm_update && [[ "$alm_name" == agent-limit-monitor && ! -L "$alm_destination" ]] &&
+            [[ -e "$alm_config" || -L "$alm_config" ]]; then
+            if [[ ! -f "$alm_config" ]]; then
+                printf 'Cannot preserve config at %s\n' "$alm_config" >&2
+                exit 1
+            fi
+            cp -pL -- "$alm_config" "$alm_stage/config.yaml"
+        fi
         if [[ -d "$alm_destination" ]] && diff -qr -x __pycache__ -x '*.pyc' -- "$alm_stage" "$alm_destination" >/dev/null; then
             printf 'Already installed at %s\n' "$alm_destination"
             exit 0
         fi
-        printf 'Existing skill was left in place at %s\n' "$alm_destination" >&2
-        exit 1
+        if ! $alm_update || [[ ! -d "$alm_destination" || -L "$alm_destination" ]]; then
+            printf 'Existing skill was left in place at %s\n' "$alm_destination" >&2
+            exit 1
+        fi
+        alm_backup=$(mktemp -d -- "$(dirname -- "$alm_parent")/.agent-limit-monitor-backup.XXXXXXXX")/$alm_name
+        mv -T -- "$alm_destination" "$alm_backup"
     fi
 
     mv -T --no-clobber -- "$alm_stage" "$alm_destination"
     if [[ -d "$alm_stage" ]]; then
         printf 'Existing skill was left in place at %s\n' "$alm_destination" >&2
         exit 1
+    fi
+    if [[ -n "$alm_backup" ]]; then
+        printf 'Backup: %s\n' "$alm_backup"
     fi
     printf 'Installed at %s\n' "$alm_destination"
 )
@@ -36,6 +68,7 @@ install_monitor() {
     install_skill "$1" agent-limit-monitor "$alm_source" \
         SKILL.md README.md config.yaml agent_limit_monitor.py install-skill.sh \
         agent_adapters agy handoff quota_monitor terminal_ui tests
+    install_skill "$1" agent-limit-moritor "$alm_source/agy/agent-limit-moritor" SKILL.md
 }
 
 install_auto() (
@@ -94,21 +127,33 @@ install_auto() (
     printf 'Installed agent-limit-monitor and the Codex, OpenCode, and AGY launchers. Start a new Bash shell.\n'
 )
 
+usage() {
+    printf 'Usage: %s [--update] [--project-opencode | --project-claude]\n       %s --auto\n' "$0" "$0" >&2
+    exit 2
+}
+
+if (( $# > 1 )); then
+    usage
+fi
 case "${1-}" in
     "")
-        alm_agy_skills="$HOME/.gemini/antigravity-cli/skills"
         install_monitor "$HOME/.agents/skills"
-        install_monitor "$alm_agy_skills"
-        install_skill "$alm_agy_skills" agent-limit-moritor "$alm_source/agy/agent-limit-moritor" SKILL.md
+        install_monitor "$HOME/.gemini/antigravity-cli/skills"
+        install_monitor "$HOME/.claude/skills"
         ;;
     --project-opencode)
         install_monitor "$alm_source/.opencode/skills"
         ;;
+    --project-claude)
+        install_monitor "$alm_source/.claude/skills"
+        ;;
     --auto)
+        if $alm_update; then
+            usage
+        fi
         install_auto
         ;;
     *)
-        printf 'Usage: %s [--project-opencode | --auto]\n' "$0" >&2
-        exit 2
+        usage
         ;;
 esac

@@ -15,7 +15,7 @@ def adapter(agent):
 def command(agent, *, prompt=None, resume=False, model=None, claude_settings=None):
     args = [BINARIES[agent]]
     if agent == "opencode" and model:
-        args.append("mini")
+        args.extend(["--standalone", "mini"])
     if resume:
         args.extend(RESUME[agent])
     if model:
