@@ -71,6 +71,7 @@ _RATE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_AGY_QUOTA = re.compile(r"^[⚠️│┃║\s]*(?:(?:API )?Error:\s*)?Individual quota reached(?:\.|$)", re.IGNORECASE)
 
 
 def rate_error(agent: str, line: str) -> bool:
@@ -97,7 +98,7 @@ def rate_error(agent: str, line: str) -> bool:
             result = obj(data.get("result")) if data.get("event") == "result" else data
             message = result.get("error")
             return (result.get("status") == "ERROR" and isinstance(message, str)
-                    and bool(_RATE.match(message) or _RATE.match(f"Error: {message}")))
+                    and bool(_AGY_QUOTA.match(message) or _RATE.match(message) or _RATE.match(f"Error: {message}")))
         if agent == "opencode":
             kind = data.get("type")
             fields = obj(data.get("data")) if kind == "session.execution.failed" else data
@@ -107,7 +108,7 @@ def rate_error(agent: str, line: str) -> bool:
                                                "provider.budget-limit", "provider.chatgpt-limit", "provider.quota")
                          or (error.get("name") == "APIError" and obj(error.get("data")).get("statusCode") == 429)))
         return False
-    return bool(_RATE.match(line))
+    return bool(_RATE.match(line) or (agent == "agy" and _AGY_QUOTA.match(line)))
 
 
 class ErrorObserver:

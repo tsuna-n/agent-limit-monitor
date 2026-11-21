@@ -53,11 +53,17 @@ def percentage(text):
 def arguments(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest="action", required=True)
-    for action in ("check", "watch", "run", "handoff"):
+    for action in ("check", "watch", "run", "handoff", "switch"):
         sub = actions.add_parser(action)
         sub.add_argument("agent", choices=AGENTS)
         sub.add_argument("--project", type=Path, default=Path.cwd())
         sub.add_argument("--config", type=Path, default=None)
+        if action in ("run", "handoff", "switch"):
+            sub.add_argument("--notes", type=Path, help="Reviewed JSON notes for a handoff.")
+        if action == "switch":
+            sub.add_argument("target", choices=AGENTS, help="Agent that receives the handoff.")
+            sub.set_defaults(threshold=None, dry_run=False)
+            continue
         sub.add_argument("--threshold", type=percentage, help="Alert at or below this remaining percentage.")
         sub.add_argument("--mock-5h", type=percentage, help="Simulated 5-hour quota remaining, in percent.")
         sub.add_argument("--mock-weekly", type=percentage, help="Simulated weekly quota remaining, in percent.")
@@ -67,8 +73,6 @@ def arguments(argv):
             sub.add_argument("--error-file", type=Path, help="Inspect existing CLI error output without echoing it.")
             sub.add_argument("--claude-status-stdin", action="store_true",
                              help="Read one trusted Claude Code status-line JSON object from stdin.")
-        if action in ("run", "handoff"):
-            sub.add_argument("--notes", type=Path, help="Reviewed JSON notes for a handoff.")
         if action == "run":
             sub.add_argument("--resume", action="store_true", help="Start by continuing the current agent's latest session.")
     hook = actions.add_parser("claude-statusline", help="Render Claude status-line JSON received on stdin.")
@@ -111,11 +115,14 @@ def poll(args, settings):
     return reading
 
 
-def announce(reading, agent, threshold, desktop=False):
+def announce(reading, agent, threshold, desktop=False, *, guidance=""):
     if not reading.trigger(threshold):
         return False
     reason = "provider reported a rate limit" if reading.blocked else f"quota at or below {threshold:g}%"
-    terminal_ui.alert(f"{agent}: {reason}.", desktop)
+    message = f"{agent}: {reason}."
+    if guidance:
+        message = f"{message} {guidance}"
+    terminal_ui.alert(message, desktop)
     return True
 
 
@@ -171,16 +178,16 @@ def launch(agent, project, lease, settings, *, resume=False, prompt=None, model=
             return 128 - status if status < 0 else status
 
 
-def handoff(args, settings, root, lease, *, resume_current=True):
+def handoff(args, settings, root, lease, *, resume_current=True, target=None):
     while True:
-        selected = terminal_ui.select(args.agent)
+        selected = target or terminal_ui.select(args.agent)
         if selected is None:
             return 0
         if selected == "continue" or selected == args.agent:
             if shutil.which(BINARIES[args.agent]):
                 return launch(args.agent, args.project, lease, settings, resume=resume_current)
             print("Current agent executable is unavailable.", file=sys.stderr)
-        elif args.notes is None:
+        elif args.notes is None and not (target or args.automatic):
             print("Supply reviewed notes with --notes before switching.", file=sys.stderr)
         elif not shutil.which(BINARIES[selected]):
             print(f"{selected} executable is unavailable.", file=sys.stderr)
@@ -189,12 +196,22 @@ def handoff(args, settings, root, lease, *, resume_current=True):
             print(verification.detail, flush=True)
             if verification.ready:
                 break
+        if target:
+            return 1
     if verification.shared_codex_possible:
         print("The selected OpenCode provider route may share Codex quota.", flush=True)
+    summary = ""
+    if args.notes is None:
+        try:
+            summary = input("Handoff summary (task, progress, and next step): ").strip()
+        except EOFError:
+            return 0
+        if not summary:
+            return 0
     print("Confirm that the previous agent and its editing tasks have stopped.", flush=True)
     if not terminal_ui.confirm(selected):
         return 0
-    package = make_package(root, args.notes)
+    package = make_package(root, args.notes, summary=summary)
     print(f"Private handoff package: {package}", flush=True)
     prompt = (f"Read the reviewed handoff package at {package}. Continue the original task in this "
               "directory using the package. Preserve the existing staged, unstaged, and untracked "
@@ -237,14 +254,20 @@ def execute(args, settings):
     if os.environ.get(ACTIVE):
         raise ValueError("An agent managed by this monitor cannot start another handoff.")
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise ValueError("Run or handoff requires an interactive terminal.")
+        raise ValueError("Running or switching agents requires an interactive terminal.")
     if getattr(args, "claude_status_stdin", False):
         raise ValueError("Use Claude status-line input with check or a dry run.")
 
     with project_lock(args.project) as (root, lease):
+        if args.action == "switch":
+            if args.target == args.agent:
+                raise ValueError("Choose a target different from the source agent.")
+            return handoff(args, settings, root, lease, target=args.target)
+        targets = ", ".join(terminal_ui.handoff_targets(args.agent))
+        guidance = f"Installed handoff options: {targets}." if targets else "No other supported CLI is installed."
         initial = poll(args, settings)
         print(f"{args.agent}: {initial.report()}", flush=True)
-        if announce(initial, args.agent, threshold, desktop):
+        if announce(initial, args.agent, threshold, desktop, guidance=guidance):
             return handoff(args, settings, root, lease, resume_current=getattr(args, "resume", True))
         if args.action == "handoff":
             print("No handoff trigger was detected.")
@@ -256,8 +279,8 @@ def execute(args, settings):
         def on_reading(reading):
             nonlocal triggered
             if not triggered and reading.trigger(threshold):
-                triggered = announce(reading, args.agent, threshold, desktop)
-                print("Exit the current agent normally to open the handoff menu.", file=sys.stderr, flush=True)
+                triggered = announce(reading, args.agent, threshold, desktop,
+                                     guidance=f"{guidance} Exit the current agent normally to open the handoff menu.")
 
         live_probe = None
         if args.agent != "claude" and mock_reading(args) is None:
@@ -268,11 +291,33 @@ def execute(args, settings):
 
 
 def main(argv=None):
-    args = arguments(argv)
-    if args.action == "claude-statusline":
-        claude.statusline(args.snapshot)
-        return 0
+    launcher = Path(sys.argv[0]).name if argv is None else ""
+    automatic = launcher in ("codex", "opencode", "agy")
     try:
+        if automatic:
+            shim_directory = os.path.realpath(os.path.dirname(sys.argv[0]))
+            path = os.environ.get("PATH", os.defpath).split(os.pathsep)
+            os.environ["PATH"] = os.pathsep.join(
+                directory for directory in path if os.path.realpath(directory) != shim_directory
+            )
+            cli_args = sys.argv[1:]
+            resume = launcher == "agy" and cli_args in (["-c"], ["--continue"])
+            # shortcut: monitor bare launches and AGY's latest-session resume, extend when other session options need monitoring.
+            interactive = sys.stdin.isatty() and sys.stdout.isatty()
+            if (cli_args and not resume) or not interactive or os.environ.get(ACTIVE) or not shutil.which(launcher):
+                try:
+                    os.execvp(launcher, [launcher, *cli_args])
+                except (FileNotFoundError, PermissionError) as error:
+                    print(f"{launcher}: {error.strerror}", file=sys.stderr)
+                    return 127 if isinstance(error, FileNotFoundError) else 126
+            argv = ["run", launcher]
+            if resume:
+                argv.append("--resume")
+        args = arguments(argv)
+        args.automatic = automatic
+        if args.action == "claude-statusline":
+            claude.statusline(args.snapshot)
+            return 0
         args.project = args.project.resolve(strict=True)
         if not args.project.is_dir():
             raise ValueError("Project must be a directory.")

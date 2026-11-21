@@ -53,6 +53,23 @@ class MonitorTests(unittest.TestCase):
         self.assertFalse(observer.feed(b"\x1b[31mAPI Error: 4"))
         self.assertTrue(observer.feed(b"29 Too Many Requests\x1b[0m\r\n"))
 
+    def test_agy_individual_quota_warning_in_terminal(self):
+        warning = "⚠ Individual quota reached. Please upgrade your subscription to increase"
+        self.assertTrue(rate_error("agy", warning))
+        self.assertFalse(rate_error("codex", warning))
+        self.assertFalse(rate_error("agy", f"The CLI displays: {warning}"))
+        observer = ErrorObserver("agy")
+        self.assertFalse(observer.feed("\x1b[33m│ ⚠️ Individual quota ".encode()))
+        self.assertTrue(observer.feed(b"reached.\x1b[0m Please upgrade your subscription to increase\r\n"
+                                      b"your limits. Resets in 4h33m56s.\r\nError ID: example\r\n"))
+
+    def test_agy_individual_quota_warning_in_structured_error(self):
+        self.assertTrue(rate_error("agy", '{"status":"ERROR","error":"Individual quota reached."}'))
+        self.assertTrue(rate_error("agy", '{"event":"result","result":'
+                                          '{"status":"ERROR","error":"Error: Individual quota reached."}}'))
+        self.assertFalse(rate_error("agy", '{"status":"SUCCESS","response":"Individual quota reached.",'
+                                           '"error":"Individual quota reached."}'))
+
     def test_oversized_line_cannot_turn_its_suffix_into_an_error(self):
         observer = ErrorObserver("claude")
         self.assertFalse(observer.feed(b"x" * (64 * 1024 + 1)))

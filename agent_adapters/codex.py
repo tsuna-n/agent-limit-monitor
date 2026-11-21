@@ -8,6 +8,8 @@ import time
 
 from quota_monitor import Reading, obj, parse_json, used_window
 
+from .common import Verification
+
 
 def quota_reading(result) -> Reading:
     result = obj(result)
@@ -86,3 +88,12 @@ def probe(cwd, timeout) -> Reading:
                     server.kill()
     except (OSError, subprocess.SubprocessError):
         return unavailable
+
+
+def verify(cwd, timeout) -> Verification:
+    reading = probe(cwd, timeout)
+    if reading.trigger(0):
+        return Verification(False, "Codex account quota is exhausted")
+    if not reading.windows:
+        return Verification(False, "Codex account quota could not be verified")
+    return Verification(True, "Codex returned authenticated account quota data")

@@ -149,6 +149,10 @@ class TerminalTests(unittest.TestCase):
         with patch("builtins.input", return_value="2"), patch("sys.stdout"):
             self.assertEqual(select_agent("opencode"), "continue")
 
+    def test_agy_can_select_codex_for_handoff(self):
+        with patch("builtins.input", return_value="4"), patch("sys.stdout"):
+            self.assertEqual(select_agent("agy"), "codex")
+
     def test_sigterm_restores_terminal_and_reaps_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             lease = os.open(Path(tmp) / "lease", os.O_RDWR | os.O_CREAT, 0o600)

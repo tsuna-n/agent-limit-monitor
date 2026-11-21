@@ -2,6 +2,6 @@
   "threshold_percent": 2,
   "poll_seconds": 120,
   "probe_timeout_seconds": 12,
-  "desktop_notifications": false,
+  "desktop_notifications": true,
   "claude_statusline": true
 }

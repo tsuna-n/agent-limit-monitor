@@ -91,10 +91,12 @@ def _git_status(project: Path) -> list[str]:
     return status or ["Clean"]
 
 
-def make_package(project: Path, notes_path: Path) -> Path:
+def make_package(project: Path, notes_path: Path | None, *, summary: str = "") -> Path:
     """Create a mode-0600 Markdown handoff file outside the project tree."""
     project = _project_root(project)
-    notes = _read_notes(notes_path)
+    notes = _read_notes(notes_path) if notes_path is not None else None
+    if notes is None and not summary.strip():
+        raise HandoffError("Handoff requires reviewed notes")
     state = _state_directory(project)
 
     branch = os.fsdecode((read_git(project, "branch", "--show-current") or b"").removesuffix(b"\n")) or "Unknown"
@@ -106,11 +108,14 @@ def make_package(project: Path, notes_path: Path) -> Path:
         f"\nGit HEAD: {_literal(head)}",
         f"\nGit status\n\n" + "\n".join(f"- {item}" for item in _git_status(project)),
     ]
-    labels = {"task": "Original task", "objective": "Objective", "completed": "Completed work", "remaining": "Remaining tasks", "tests": "Test results", "issues": "Known issues", "next": "Next recommended actions"}
-    for field in _FIELDS:
-        value = notes[field]
-        body = "\n".join(f"- {item}" for item in value) if isinstance(value, list) else value
-        sections.append(f"\n## {labels[field]}\n\n{body}")
+    if notes is None:
+        sections.append(f"\n## Handoff summary\n\n{_clean(summary)}")
+    else:
+        labels = {"task": "Original task", "objective": "Objective", "completed": "Completed work", "remaining": "Remaining tasks", "tests": "Test results", "issues": "Known issues", "next": "Next recommended actions"}
+        for field in _FIELDS:
+            value = notes[field]
+            body = "\n".join(f"- {item}" for item in value) if isinstance(value, list) else value
+            sections.append(f"\n## {labels[field]}\n\n{body}")
     content = "\n".join(sections) + "\n"
 
     output = tempfile.NamedTemporaryFile(

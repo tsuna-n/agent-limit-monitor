@@ -13,7 +13,11 @@ import time
 import tty
 
 
-_AGENTS = (("agy", "AGY CLI"), ("opencode", "OpenCode"), ("claude", "Claude Code"))
+_AGENTS = (("agy", "AGY CLI"), ("opencode", "OpenCode"), ("claude", "Claude Code"), ("codex", "Codex"))
+
+
+def handoff_targets(current: str) -> list[str]:
+    return [label for agent, label in _AGENTS if agent != current and shutil.which(agent)]
 
 
 def alert(message: str, desktop: bool = False) -> None:
@@ -36,19 +40,20 @@ def alert(message: str, desktop: bool = False) -> None:
 def select(current: str) -> str | None:
     """Show the agent menu. Return an agent key, 'continue', or None to cancel."""
     print("\nAgent handoff")
-    for number, (_, label) in enumerate(_AGENTS, 1):
-        print(f"  {number}. {label}")
-    print("  4. Continue current agent")
-    print("  5. Cancel handoff")
+    for number, (agent, label) in enumerate(_AGENTS, 1):
+        status = " (current)" if agent == current else " (not installed)" if not shutil.which(agent) else ""
+        print(f"  {number}. {label}{status}")
+    print("  5. Continue current agent")
+    print("  6. Cancel handoff")
     print(f"Current agent: {current}")
     try:
-        choice = input("Select [1-5]: ").strip()
+        choice = input("Select [1-6]: ").strip()
     except (EOFError, KeyboardInterrupt):
         return None
-    if choice in ("1", "2", "3"):
+    if choice in ("1", "2", "3", "4"):
         agent = _AGENTS[int(choice) - 1][0]
         return "continue" if agent == current else agent
-    if choice == "4":
+    if choice == "5":
         return "continue"
     return None
 
@@ -174,9 +179,9 @@ def run(
                         raise
                     data = b""
                 if data:
+                    _write_all(stdout_fd, data)
                     if observe is not None:
                         observe(data)
-                    _write_all(stdout_fd, data)
                 else:
                     master_open = False
 

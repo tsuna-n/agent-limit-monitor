@@ -16,7 +16,23 @@ Add `$HOME/.local/bin` to your `PATH` if needed. You can also run `python3 /abso
 
 Run `bash install-skill.sh` to install the skill for Codex and OpenCode in `~/.agents/skills/agent-limit-monitor/` and for AGY in `~/.gemini/antigravity-cli/skills/agent-limit-monitor/`. Run `bash install-skill.sh --project-opencode` to install it for OpenCode in this checkout only. The installer leaves existing copies in place. Start a new agent session to pick up the skill. [Codex skills](https://learn.chatgpt.com/docs/build-skills), [Antigravity skills](https://antigravity.google/docs/skills), [OpenCode skills](https://opencode.ai/docs/skills/)
 
+### Monitor normal launches in Bash
+
+Run this once from the monitor checkout, then open a new Bash terminal.
+
+```bash
+bash install-skill.sh --auto
+```
+
+In your working project, type `codex`, `opencode`, or `agy` to open a monitored interactive session. `agy --continue` and `agy -c` resume the latest AGY session with monitoring. Other commands with arguments and non-interactive calls go straight to the original CLI.
+
+The AGY launcher recognizes `Individual quota reached` even when the quota prevents a slash skill from running. The alert names the installed alternatives. Save your work and exit the agent normally to open the menu. To switch, select an agent, enter a short handoff summary, and type `yes` to confirm.
+
+Setup adds an `agent-limit-monitor` PATH line to `~/.bashrc` and links the monitor command and launchers under `~/.local/share/agent-limit-monitor/bin/` to this checkout. Keep the checkout at that path. To turn off automatic monitoring, remove the tagged line from `~/.bashrc` and open a new terminal.
+
 ## Use
+
+To choose a handoff destination, invoke `$agent-limit-monitor` in Codex, `@agent-limit-monitor` in OpenCode, or `/agent-limit-monitor` (also `/agent-limit-moritor`) in AGY. The skill shows the Bash handoff command for the selected destination. If the source CLI cannot respond because its quota is exhausted, use `switch` directly from Bash after exiting it.
 
 Run from the project directory. Every command also accepts `--project DIR`.
 
@@ -26,11 +42,13 @@ agent-limit-monitor watch codex --threshold 3
 agent-limit-monitor run codex --notes /path/to/reviewed-notes.json
 agent-limit-monitor run claude --resume --notes /path/to/reviewed-notes.json
 agent-limit-monitor run codex --dry-run --mock-5h 2 --mock-weekly 43
+agent-limit-monitor switch agy codex
 ```
 
 - `check` reads once. `watch` polls and alerts on entry into a low-quota state.
 - `run` starts a managed interactive agent in the same directory. It polls while the agent runs and watches for rate-limit errors. If an alert occurs during the session, save work and exit normally to open the menu. A handoff after an already-closed session is also available with `handoff AGENT --notes FILE`. A previous CLI error can be supplied with `--error-file FILE` to `check` or `handoff`. Use a CLI-generated error stream with `--error-file`, such as Codex's `exec --json` output.
-- The menu offers AGY CLI, OpenCode, Claude Code, Continue current agent, and Cancel handoff. The selected CLI must pass its availability and authentication checks. Type `yes` to attest that the prior agent and its editing jobs have stopped and to start the selected agent with the handoff package. The monitor offers a single successful switch per invocation.
+- `switch SOURCE TARGET` starts a manual handoff after the source exits. It checks the target, asks for a summary or reads `--notes FILE`, and waits for `yes` before launching the target. It works without quota data or a rate-limit error from the source.
+- The menu offers AGY CLI, OpenCode, Claude Code, Codex, Continue current agent, and Cancel handoff. The selected CLI must pass its availability and authentication checks. Codex also needs a verified quota with capacity remaining. Type `yes` to attest that the prior agent and its editing jobs have stopped and to start the selected agent with the handoff package. The monitor offers a single successful switch per invocation.
 - `--dry-run` runs one check and prints the action it would take. Pair it with `--mock-5h`, `--mock-weekly`, or `--mock-rate-error` to simulate values without invoking any vendor CLI.
 - `config.yaml` accepts the JSON subset of YAML. Copy it and pass `--config FILE` for local settings. `threshold_percent` defaults to 2, `poll_seconds` to 120, and `probe_timeout_seconds` to 12. Set `desktop_notifications` to `true` to add a desktop alert to the terminal bell. Set `claude_statusline` to `false` to keep your existing Claude status line during managed runs.
 

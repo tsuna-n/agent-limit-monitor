@@ -8,11 +8,28 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from agent_adapters import agy, opencode
+from agent_adapters import agy, codex, opencode
 
 
 def process(argv, data=None, *, code=0, error=b""):
     return subprocess.CompletedProcess(argv, code, json.dumps(data).encode(), error)
+
+
+class CodexTests(unittest.TestCase):
+    def test_verification_requires_available_quota(self):
+        available = {"windowDurationMins": 300, "usedPercent": 90}
+        exhausted = {"windowDurationMins": 10080, "usedPercent": 100}
+        for limits, ready in (
+            ({"primary": available}, True),
+            ({"primary": available, "secondary": exhausted}, False),
+            ({"primary": available, "rateLimitReachedType": "rate_limit_reached"}, False),
+            ({}, False),
+        ):
+            with self.subTest(limits=limits):
+                reading = codex.quota_reading({"rateLimits": limits})
+                with patch.object(codex, "probe", return_value=reading) as probe:
+                    self.assertEqual(codex.verify(Path.cwd(), 2).ready, ready)
+                    probe.assert_called_once_with(Path.cwd(), 2)
 
 
 class AntigravityTests(unittest.TestCase):
