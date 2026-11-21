@@ -42,6 +42,18 @@ class AntigravityTests(unittest.TestCase):
             self.assertNotIn("sensitive group name", reading.report())
             self.assertTrue(agy.verify(Path.cwd(), 2).ready)
 
+    def test_usage_command_envelope_reports_quota(self):
+        payload = {"status": "SUCCESS", "command": {
+            "name": "usage",
+            "data": {"groups": [{"buckets": [
+                {"window": "5h", "remaining_fraction": 0.25},
+                {"window": "weekly", "remaining_fraction": 0.75},
+            ]}]},
+        }}
+        with patch.object(agy, "capture", return_value=process([], payload)):
+            reading = agy.probe(Path.cwd(), 2)
+            self.assertEqual([(w.label, w.remaining) for w in reading.windows], [("5-hour", 25), ("Weekly", 75)])
+
     def test_generic_success_and_rate_limit_have_no_quota(self):
         with patch.object(agy, "capture", return_value=process([], {"status": "SUCCESS"})):
             self.assertFalse(agy.verify(Path.cwd(), 2).ready)

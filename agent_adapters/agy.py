@@ -71,7 +71,10 @@ def probe(cwd, timeout) -> Reading:
     if result.returncode != 0:
         blocked = ErrorObserver("agy").feed(result.stdout + b"\n" + result.stderr, final=True)
         return Reading(detail="Antigravity quota probe failed", blocked=blocked)
-    return usage_reading(parse_json(result.stdout))
+    report = obj(parse_json(result.stdout))
+    if report.get("status") == "SUCCESS" and "command" in report:
+        return usage_reading(report["command"])
+    return usage_reading(report)
 
 
 def verify(cwd, timeout) -> Verification:
